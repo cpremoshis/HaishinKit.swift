@@ -156,6 +156,12 @@ public actor SRTConnection: NetworkConnection {
         }
     }
 
+    /// senderogo patch: direct handle to the socket's dedicated send thread, so
+    /// the publish loop can enqueue without any actor hop per frame.
+    var sender: SRTSender? {
+        get async { await socket?.sender }
+    }
+
     func recv() {
         Task {
             guard let socket else {

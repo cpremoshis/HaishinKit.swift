@@ -2,6 +2,10 @@ import Foundation
 import HaishinKit
 import libsrt
 import Logboard
+import os
+
+// senderogo patch: libsrt sender-side counters, once per second while live.
+private let srtBstatsLog = os.Logger(subsystem: "com.senderogo.publisher", category: "srt-bstats")
 
 final actor SRTSocket {
     static let payloadSize: Int = 1316
@@ -83,13 +87,10 @@ final actor SRTSocket {
     }
 
     private(set) var isRunning = false
+    // senderogo patch: dedicated send thread; replaces the outputs AsyncStream.
+    private(set) var sender: SRTSender?
     private var perf: CBytePerfMon = .init()
     private var socket: SRTSOCKET = SRT_INVALID_SOCK
-    private var outputs: AsyncStream<Data>.Continuation? {
-        didSet {
-            oldValue?.finish()
-        }
-    }
     private var connected: Bool {
         status == .connected
     }
@@ -188,13 +189,14 @@ final actor SRTSocket {
         }
     }
 
+    /// senderogo patch: the publish hot path is SRTSender (dedicated thread,
+    /// see its header). This actor method remains for compatibility but only
+    /// forwards to the sender.
     func send(_ data: Data) throws {
         guard connected else {
             throw Error.notConnected
         }
-        for data in data.chunk(Self.payloadSize) {
-            outputs?.yield(data)
-        }
+        sender?.enqueue(data)
     }
 
     private func configure(_ options: [SRTSocketOption], restriction: SRTSocketOption.Restriction) -> Bool {
@@ -259,16 +261,11 @@ extension SRTSocket: AsyncRunner {
         guard !isRunning else {
             return
         }
-        let stream = AsyncStream<Data> { continuation in
-            self.outputs = continuation
-        }
-        Task {
-            for await data in stream {
-                let result = sendmsg(data)
-                if result == -1 {
-                    await stopRunning()
-                }
-            }
+        // senderogo patch: publish data is drained by a dedicated thread —
+        // never by a Task on the shared cooperative executor, which a busy
+        // capture pipeline can starve to ~75 wakeups/s.
+        sender = SRTSender(socket: socket) { [weak self] in
+            Task { await self?.stopRunning() }
         }
         isRunning = true
     }
@@ -277,9 +274,11 @@ extension SRTSocket: AsyncRunner {
         guard isRunning else {
             return
         }
+        // srt_close first: it unblocks a send thread waiting inside srt_sendmsg.
         srt_close(socket)
         socket = SRT_INVALID_SOCK
-        outputs = nil
+        sender?.close()
+        sender = nil
         isRunning = false
     }
 }
@@ -289,6 +288,17 @@ extension SRTSocket: NetworkTransportReporter {
     func makeNetworkTransportReport() -> NetworkTransportReport {
         _ = bstats()
         let performanceData = self.performanceData
+        // senderogo patch: surface libsrt's own per-interval counters to the
+        // unified log (1 Hz — this is called by NetworkMonitor's tick). The
+        // interesting field is usPktSndPeriod: the inter-packet pacing interval
+        // the congestion controller is enforcing on the send queue.
+        let line = String(
+            format: "sndPeriod=%.1fus flight=%d cwnd=%d rtt=%.1fms estBW=%.2fMbps sendRate=%.2fMbps sent=%d retrans=%d sndLoss=%d sndDrop=%d sndBufPkts=%d sndBufMs=%d",
+            perf.usPktSndPeriod, perf.pktFlightSize, perf.pktCongestionWindow,
+            perf.msRTT, perf.mbpsBandwidth, perf.mbpsSendRate,
+            perf.pktSent, perf.pktRetrans, perf.pktSndLoss, perf.pktSndDrop,
+            perf.pktSndBuf, perf.msSndBuf)
+        srtBstatsLog.notice("\(line, privacy: .public)")
         return .init(
             queueBytesOut: Int(performanceData.byteSndBuf),
             totalBytesIn: Int(performanceData.byteRecvTotal),

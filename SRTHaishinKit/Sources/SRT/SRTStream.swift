@@ -68,24 +68,42 @@ public actor SRTStream {
         if writer.expectedMedias.isEmpty {
             logger.error("Please set expected media.")
         }
-        Task {
+        // senderogo patch: the publish pipeline loops run at .high priority.
+        // At default priority the 4K capture/composite/encode load starves
+        // these per-frame hops on the cooperative executor (measured ~73% of
+        // realtime through the actor mailboxes → delivery lags & backlogs).
+        Task(priority: .high) {
             for await buffer in outgoing.videoOutputStream {
                 append(buffer)
             }
         }
-        Task {
+        Task(priority: .high) {
             for await buffer in outgoing.audioOutputStream {
                 append(buffer.0, when: buffer.1)
             }
         }
-        Task {
+        Task(priority: .high) {
             for await buffer in outgoing.videoInputStream {
                 outgoing.append(video: buffer)
             }
         }
-        Task {
+        Task(priority: .high) {
+            // senderogo patch: enqueue straight onto the socket's send thread —
+            // zero actor hops per frame. Awaiting connection.send per blob paid
+            // one cooperative-executor wakeup per frame, which a loaded capture
+            // pipeline stretches to 10+ ms each (~10 Mbps ceiling). The sender
+            // is resolved lazily because the socket finishes startRunning
+            // during connect.
+            var sender: SRTSender?
             for await data in writer.output {
-                await connection.send(data)
+                if sender == nil {
+                    sender = await connection.sender
+                }
+                if let sender {
+                    sender.enqueue(data)
+                } else {
+                    await connection.send(data)
+                }
             }
         }
     }

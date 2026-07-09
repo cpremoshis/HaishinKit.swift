@@ -38,8 +38,21 @@ public enum DynamicRangeMode: Sendable {
         guard let colorSpace else {
             return nil
         }
+        // senderogo patch: composite SDR in 8-bit instead of half-float. The
+        // sources are all 8-bit (NV12 camera frames, 8-bit overlays), so RGBAh
+        // working buffers only doubled the compositor's memory traffic — at 4K
+        // that's ~66 MB/frame of float16 vs ~33 MB of RGBA8, a real share of
+        // the pipeline load that keeps 4K@25 short of realtime on device. HDR
+        // keeps RGBAh: 10-bit content genuinely needs the headroom.
+        let workingFormat: CIFormat
+        switch self {
+        case .sdr:
+            workingFormat = .RGBA8
+        case .hdr:
+            workingFormat = .RGBAh
+        }
         return [
-            .workingFormat: CIFormat.RGBAh.rawValue,
+            .workingFormat: workingFormat.rawValue,
             .workingColorSpace: colorSpace,
             .outputColorSpace: colorSpace
         ]

@@ -31,6 +31,46 @@ investigation: `senderogo-ios/SRT_SEND_PATH_INVESTIGATION.md`.
    (subsystem `com.senderogo.publisher`, category `srt-bstats`): send period, flight, cwnd, RTT,
    estimated bandwidth, send rate, retrans/loss/drops, buffer depth. Diagnostic aid; gate or strip
    before upstreaming.
+6. **`DynamicRangeMode.contextOptions`** — SDR composites in `RGBA8` working format instead of
+   `RGBAh` (HDR keeps `RGBAh`). All SDR sources are 8-bit, so half-float working buffers only
+   doubled the offscreen compositor's memory traffic (~66 → ~33 MB/frame at 4K) — a share of the
+   pipeline load behind the 4K@25 realtime deficit. **A/B result (2026-07-08): no measurable
+   throughput change at 4K@25 (~78% vs 77% baseline) — the working format is NOT where the deficit
+   lives. Kept anyway: no visible quality regression (user-checked for banding) and halved
+   compositor memory traffic is free thermal headroom on weaker devices.**
+> **Status note (2026-07-08 night):** patches 7–9 below were implemented, device-verified, and then
+> **reverted from the working tree** by decision — patch 6 (RGBA8) is the last code change kept.
+> The full diff of 7–9 (plus the diagnostic stage-rate counters and the bstats `appQ=` field) is
+> preserved at the repo root in `reverted-2026-07-08-round-two.patch` for reimplementation.
+
+7. **`StreamRecorderWorker` (new) + `StreamRecorder` rewire** — all `AVAssetWriter` ingest
+   (`startWriting`, `startSession`, `input.append`) moves from the `StreamRecorder` actor onto a
+   dedicated thread with a bounded condition-guarded FIFO; `stopRecording` drains it before
+   finalizing. Why: `AVAssetWriterInput.append` blocks the calling thread with real ingest work —
+   from an actor that means occupying cooperative-pool threads ~77×/s, which starved the live
+   pipeline's actors (xctrace-profiled on device: live leg service fell 30 → ~20 fps whenever the
+   recorder ran, CPU/GPU/thermals all idle; delivery 78% at 4K@25 record+stream vs 97% stream-only,
+   scaling with bitrate 97%/87%/78% at 15/20/25). Same pattern as `SRTSender`. Also suspected of
+   curing the live-audio-leg death under record+stream load (AAC path starvation → CoreMedia error
+   burst → audio stops mid-session while local recording stays perfect). **A/B result: no
+   measurable delivery change on its own (80.6% vs 78%) — kept as correct-by-construction (never
+   block the cooperative pool), but the dominant mechanism was elsewhere (patches 8–9).**
+8. **`MediaMixerOutput` track ids → nonisolated synchronous reads** (protocol + all conformers:
+   `SRTStream`, `StreamRecorder`, `MTHKView`, `PiPHKView`, `RTMPStream`, `RTCStream`; lock-backed
+   storage). They were `get async`, so MediaMixer's per-buffer delivery loops paid an actor hop per
+   output per buffer (~100+/s) — including MainActor hops via the attached preview view — just to
+   re-read a constant. 1 Hz stage counters showed audio ingestion at ~30 of 46.9 buffers/s with the
+   old reads, and full rate (48/s) after this patch.
+9. **`TSMuxWorker` (new) + `TSWriter.onOutput` + `SRTStream.publish` rewire** — the whole TS mux
+   moves to a dedicated thread. Packetization ran as SRTStream actor turns (one per encoded frame,
+   AAC buffer, and mux blob); under load every consumer loop pegged at the same ~27 turns/s (CPU
+   idle) — the actor's turn rate was the pipeline's currency, and fixing patch 8 made it worse by
+   spending more turns on ingestion (4K@25 fell to 56%). Now: detached consumer loops enqueue
+   encoded buffers to the worker (O(µs)), the worker owns the TSWriter, and mux output goes
+   synchronously into `SRTSender.enqueue` — encoder to wire with zero actor turns. `close()` drains
+   the worker before clearing the writer. **A/B result (cooled device): 4K@25 record+stream went
+   56% → 97.6% of wall time with full-length audio; mux thread runs at full input rate
+   (27 video + 48 audio items/s), wire sustains 25–27 Mbps, all queues empty. SOLVED.**
 
 ## Device-verified results (iPad Air 5, iOS 26.5, Release build)
 

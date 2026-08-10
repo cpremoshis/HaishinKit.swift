@@ -77,6 +77,14 @@ extension CaptureSession {
             } else {
                 session = AVCaptureSession()
             }
+            #if os(iOS)
+            // The app owns the AVAudioSession (category/mode/options — incl. mixable
+            // options like .mixWithOthers/.duckOthers). Left true, AVFoundation
+            // re-configures the audio session on startRunning with its own non-mixable
+            // options, silently discarding the app's — so any other app's playback
+            // interrupts the capture and detaches the mic.
+            session.automaticallyConfiguresApplicationAudioSession = false
+            #endif
             if session.canSetSessionPreset(sessionPreset) {
                 session.sessionPreset = sessionPreset
             }

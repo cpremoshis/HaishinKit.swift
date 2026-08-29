@@ -72,6 +72,20 @@ investigation: `senderogo-ios/SRT_SEND_PATH_INVESTIGATION.md`.
    56% → 97.6% of wall time with full-length audio; mux thread runs at full input rate
    (27 video + 48 audio items/s), wire sustains 25–27 Mbps, all queues empty. SOLVED.**
 
+10. **`AudioRingBuffer` discontinuity re-anchor** (+ `AudioMixerTrack`, `AudioCodec` opt in) —
+   a forward input-timestamp jump above `defaultDiscontinuityThreshold` (1 s) resets the ring and
+   re-anchors on the new timeline; `append` returns `true` so the owner restarts its `AudioTime`
+   output clock too. Upstream fills every gap with silence to keep the output contiguous, and
+   never resets across a detach/re-attach of the same-format input. The app releases the mic at
+   every stop, so the next session's first buffer arrived minutes ahead of the ring's clock and
+   the whole idle gap was synthesized as silent 1024-frame buffers in one synchronous burst
+   (~14× realtime) to every output — recorder, SRT session, level meter. Field case (2026-08-28,
+   iPhone 12 mini / iOS 26.6.1): 282 s idle → a 36 s recording saved as 4:56 with 258.6 s of
+   −91 dB AAC and a matching empty edit on the video track; the receiver's file of the same
+   session carried the same 256 s prefix; the meter sat dead ~20 s. Idle gaps under ~24 s never
+   showed (the burst finished before the recorder was armed). Backward jumps keep upstream
+   behavior; `AudioMixerByMultiTrack`'s per-track rings and `AudioMonitor` stay opted out.
+
 ## Device-verified results (iPad Air 5, iOS 26.5, Release build)
 
 | Config | Stock 2.2.5 | This fork |

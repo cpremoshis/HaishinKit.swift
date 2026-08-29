@@ -64,7 +64,12 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
         if !audioTime.hasAnchor {
             audioTime.anchor(sampleBuffer.presentationTimeStamp, sampleRate: outputFormat.sampleRate)
         }
-        ringBuffer?.append(sampleBuffer)
+        if ringBuffer?.append(sampleBuffer) == true {
+            // senderogo patch: the input timeline jumped (AudioRingBuffer.discontinuityThreshold)
+            // — restart the output clock on it instead of stamping on from the old anchor.
+            audioTime.reset()
+            audioTime.anchor(sampleBuffer.presentationTimeStamp, sampleRate: outputFormat.sampleRate)
+        }
         resample()
     }
 
@@ -73,7 +78,11 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
         if !audioTime.hasAnchor {
             audioTime.anchor(when)
         }
-        ringBuffer?.append(audioBuffer, when: when)
+        if ringBuffer?.append(audioBuffer, when: when) == true {
+            // senderogo patch: as above.
+            audioTime.reset()
+            audioTime.anchor(when)
+        }
         resample()
     }
 
@@ -116,6 +125,9 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
             return
         }
         ringBuffer = .init(inputFormat)
+        // senderogo patch: a detached-and-reattached input restarts the timeline, it doesn't
+        // owe the mix minutes of silence.
+        ringBuffer?.discontinuityThreshold = AudioRingBuffer.defaultDiscontinuityThreshold
         inputBuffer = .init(pcmFormat: inputFormat, frameCapacity: kAudioMixerTrack_frameCapacity * 4)
         outputBuffer = .init(pcmFormat: outputFormat, frameCapacity: kAudioMixerTrack_frameCapacity)
         if logger.isEnabledFor(level: .info) {

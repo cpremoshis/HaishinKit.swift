@@ -87,7 +87,11 @@ final class AudioCodec {
         }
         var error: NSError?
         if let audioBuffer = audioBuffer as? AVAudioPCMBuffer {
-            ringBuffer?.append(audioBuffer, when: when)
+            if ringBuffer?.append(audioBuffer, when: when) == true {
+                // senderogo patch: input timeline discontinuity — re-anchor the output clock
+                // (below) on the new timeline; the mixer upstream just did the same.
+                audioTime.reset()
+            }
             if !audioTime.hasAnchor {
                 audioTime.anchor(when.makeTime(), sampleRate: audioConverter.outputFormat.sampleRate)
             }
@@ -158,6 +162,8 @@ final class AudioCodec {
         settings.apply(converter, oldValue: nil)
         if inputFormat.formatDescription.mediaSubType == .linearPCM {
             ringBuffer = AudioRingBuffer(inputFormat)
+            // senderogo patch: see AudioRingBuffer.discontinuityThreshold.
+            ringBuffer?.discontinuityThreshold = AudioRingBuffer.defaultDiscontinuityThreshold
         }
         if self.outputFormat?.sampleRate != outputFormat.sampleRate {
             audioTime.reset()

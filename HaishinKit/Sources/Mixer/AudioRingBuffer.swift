@@ -8,6 +8,17 @@ final class AudioRingBuffer {
     private static let bufferCounts: UInt32 = 16
     private static let numSamples: UInt32 = 1024
 
+    // senderogo patch: a forward timestamp jump larger than this (seconds) is a discontinuity,
+    // not a dropout. Upstream fills every gap with silence so the output stays contiguous —
+    // right for a few dropped buffers, wrong for the minutes an input spends detached (the app
+    // releases the mic between sessions): the whole gap was synthesized as silence in one burst
+    // at ~14× realtime and pushed through every output, so recordings and streams gained minutes
+    // of silent audio ahead of the first real frame and the level meter sat dead until the
+    // backlog cleared (2026-08-28). Owners opt in (nil keeps upstream behavior) and re-anchor
+    // their own output clock when `append` returns true. Backward jumps are left as they were.
+    static let defaultDiscontinuityThreshold: TimeInterval = 1.0
+    var discontinuityThreshold: TimeInterval?
+
     var counts: Int {
         if tail <= head {
             return head - tail + skip
@@ -41,9 +52,12 @@ final class AudioRingBuffer {
         return inNumberFrames <= counts
     }
 
-    func append(_ sampleBuffer: CMSampleBuffer) {
+    /// Returns true when the buffer's timestamp was treated as a discontinuity and the ring
+    /// re-anchored on it (senderogo patch — see `discontinuityThreshold`).
+    @discardableResult
+    func append(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard CMSampleBufferDataIsReady(sampleBuffer) else {
-            return
+            return false
         }
         let targetSampleTime: CMTimeValue
         if sampleBuffer.presentationTimeStamp.timescale == Int32(inputBuffer.format.sampleRate) {
@@ -54,9 +68,10 @@ final class AudioRingBuffer {
         if sampleTime == 0 {
             sampleTime = targetSampleTime
         }
+        let reanchored = reanchorIfDiscontinuous(targetSampleTime)
         if outputBuffer.frameLength < sampleBuffer.numSamples {
             skip += sampleBuffer.numSamples
-            return
+            return reanchored
         }
         if inputBuffer.frameLength < sampleBuffer.numSamples {
             if let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(sampleBuffer.numSamples)) {
@@ -85,12 +100,17 @@ final class AudioRingBuffer {
         skip = max(Int(targetSampleTime - sampleTime), 0)
         sampleTime += Int64(skip)
         append(inputBuffer)
+        return reanchored
     }
 
-    func append(_ audioPCMBuffer: AVAudioPCMBuffer, when: AVAudioTime) {
+    /// Returns true when `when` was treated as a discontinuity and the ring re-anchored on it
+    /// (senderogo patch — see `discontinuityThreshold`).
+    @discardableResult
+    func append(_ audioPCMBuffer: AVAudioPCMBuffer, when: AVAudioTime) -> Bool {
         if sampleTime == 0 {
             sampleTime = when.sampleTime
         }
+        let reanchored = reanchorIfDiscontinuous(when.sampleTime)
         if inputBuffer.frameLength < audioPCMBuffer.frameLength {
             if let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: audioPCMBuffer.frameCapacity) {
                 self.inputBuffer = buffer
@@ -101,6 +121,25 @@ final class AudioRingBuffer {
         skip = Int(max(when.sampleTime - sampleTime, 0))
         sampleTime += Int64(skip)
         append(inputBuffer)
+        return reanchored
+    }
+
+    // senderogo patch: see `discontinuityThreshold`. `targetSampleTime` is the incoming buffer's
+    // start in input frames; `sampleTime` is where the ring expected it.
+    private func reanchorIfDiscontinuous(_ targetSampleTime: AVAudioFramePosition) -> Bool {
+        guard let discontinuityThreshold else {
+            return false
+        }
+        let gap = targetSampleTime - sampleTime
+        guard Int64(discontinuityThreshold * inputFormat.sampleRate) < gap else {
+            return false
+        }
+        if logger.isEnabledFor(level: .info) {
+            logger.info("audio discontinuity of", Double(gap) / inputFormat.sampleRate, "s — re-anchoring instead of filling it with silence")
+        }
+        reset()
+        sampleTime = targetSampleTime
+        return true
     }
 
     func render(_ inNumberFrames: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>?, offset: Int = 0) -> OSStatus {

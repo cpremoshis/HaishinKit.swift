@@ -135,7 +135,7 @@ final class AudioRingBuffer {
             return false
         }
         if logger.isEnabledFor(level: .info) {
-            logger.info("audio discontinuity of", Double(gap) / inputFormat.sampleRate, "s — re-anchoring instead of filling it with silence")
+            logger.info("audio discontinuity of ", String(format: "%.3f", Double(gap) / inputFormat.sampleRate), " s — re-anchoring instead of filling it with silence")
         }
         reset()
         sampleTime = targetSampleTime

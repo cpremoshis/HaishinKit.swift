@@ -86,6 +86,31 @@ investigation: `senderogo-ios/SRT_SEND_PATH_INVESTIGATION.md`.
    showed (the burst finished before the recorder was armed). Backward jumps keep upstream
    behavior; `AudioMixerByMultiTrack`'s per-track rings and `AudioMonitor` stay opted out.
 
+11. **`HaishinKitLog.sink` (new, `HaishinKit/Sources/Util/HaishinKitLog.swift`)** — a host-app
+   hook for the library's Logboard output. The default appender is `print`, which only an
+   attached debugger sees, so on a device running unattached for hours every warn/error the
+   library raised mid-session (encoder failures, SRT socket errors, audio interruptions, format
+   changes, the patch-10 re-anchor line) was simply lost. The app sets the sink once at launch
+   and files each line in its persistent diagnostics log; nil restores console output.
+
+12. **`StreamRecorder.setMovieFragmentInterval` floor 10 s → 1 s** — the fragment interval is
+   the loss ceiling when the process dies, and nothing before the *first* checkpoint survives:
+   a recording backgrounded 8 s in and killed on resume (patch-free SIGPIPE, see the app's
+   `SenderoGoApp.init`) came back as `ftyp+wide+mdat`, no `moov` (2026-08-29). A checkpoint is
+   a few KB of index and sub-millisecond work, so the app now runs 2 s. The iOS 26.6 seal
+   regression (FB24390698) is not a concern: it is MP4-layout-specific and the app records
+   QuickTime (ios b764746, ~278 seals verified clean).
+
+13. **`SRTConnection`: no `srt_cleanup()` in deinit; `srt_startup()` once per process** —
+   upstream paired them per object, but both are ref-counted process-wide calls: releasing the
+   last live connection ran libsrt's global teardown, which joins the GC thread, which waits for
+   every socket to be collected. After iOS shut a suspended app's sockets ("Shutdown sockets
+   (SVC)") the dead socket never collected; the join never returned; the release was on the
+   main actor (`closeDeadStreamLeg` from the reconnect loop), so the UI froze and the
+   scene-update watchdog killed the app (0x8BADF00D, 2026-08-29 13:33 — hang report shows
+   `SRTConnection.deinit → srt::CUDT::cleanup → CUDTUnited::cleanup → pthread_join`, GC thread
+   still looping). Per-socket cleanup is `srt_close`, already done in `SRTSocket.stopRunning`.
+
 ## Device-verified results (iPad Air 5, iOS 26.5, Release build)
 
 | Config | Stock 2.2.5 | This fork |

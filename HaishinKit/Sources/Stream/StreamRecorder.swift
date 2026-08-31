@@ -134,10 +134,15 @@ public actor StreamRecorder {
     /// Sets the movie fragment interval in sec.
     ///
     /// This value allows the file to be written continuously, so the file will remain even if the app crashes or is forcefully terminated. A value of 10 seconds or more is recommended.
+    ///
+    /// senderogo patch: the floor is 1 s, not 10 s. The interval is the loss ceiling when the
+    /// process dies — nothing before the FIRST checkpoint survives at all (an 8 s recording
+    /// killed on resume came back index-less, 2026-08-29) — and a checkpoint is a few KB of
+    /// index, so short intervals cost nothing measurable. (SENDEROGO_PATCHES.md §12)
     /// - seealso: https://developer.apple.com/documentation/avfoundation/avassetwriter/1387469-moviefragmentinterval
     public func setMovieFragmentInterval(_ movieFragmentInterval: Double?) {
         if let movieFragmentInterval {
-            self.movieFragmentInterval = max(10.0, movieFragmentInterval)
+            self.movieFragmentInterval = max(1.0, movieFragmentInterval) // senderogo patch: was 10.0
         } else {
             self.movieFragmentInterval = nil
         }

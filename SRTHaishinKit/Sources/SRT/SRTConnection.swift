@@ -35,15 +35,25 @@ public actor SRTConnection: NetworkConnection {
     private var listener: SRTSocket?
     private var networkMonitor: NetworkMonitor?
 
+    // senderogo patch: libsrt's runtime is started once per process and never torn down.
+    // Upstream paired `srt_startup()` in init with `srt_cleanup()` in deinit — but those are
+    // ref-counted PROCESS-wide calls: when the connection being released is the last one
+    // alive, `srt_cleanup()` shuts the whole runtime down and joins its garbage-collector
+    // thread, which waits for every socket to be collected first. iOS shuts a suspended app's
+    // sockets out from under libsrt; the dead socket then never collects, the join never
+    // returns, and because the release ran on the main actor the app froze and the
+    // scene-update watchdog killed it (0x8BADF00D, 2026-08-29). libsrt's own guidance is
+    // startup once, cleanup at process exit; per-socket cleanup is `srt_close`.
+    private static let libsrtStarted: Int32 = srt_startup()
+
     /// Creates an object.
     public init() {
-        srt_startup()
+        _ = Self.libsrtStarted
         socket = SRTSocket()
     }
 
     deinit {
         streams.removeAll()
-        srt_cleanup()
     }
 
     /// Gets a SRTSocketOption.
